@@ -1,0 +1,13 @@
+sample_id	pt_id	group
+Sample1	0B	A
+Sample2	0E	A
+Sample3	0H	A
+Sample4	10B	B
+Sample5	10E	B
+Sample6	10H	B
+Sample7	100B	C
+Sample8	100E	C
+Sample9	100H	C
+Sample10	500B	D
+Sample11	500E	D
+Sample12	500H	D

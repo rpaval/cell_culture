@@ -1,0 +1,227 @@
+---
+title: "qPCR Analysis"
+author: "RPD"
+date: "15/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+theme_set(theme_bw())
+library(ReadqPCR)
+library(NormqPCR)
+library(lmerTest) 
+library(emmeans) 
+#setwd
+rm(list=ls())
+
+# get data, has to be tab delimited text file here
+all_data11 <- read.qPCR('qpcr_plate1.txt', verbose=T)
+all_data12 <- read.qPCR('qpcr_plate2.txt', verbose=T)
+
+# read pheno data & create annotated dataframe 
+p11 <- read.table('pheno_plate1.txt', sep='\t', header=TRUE)
+rownames(p11)<-p11$sample_id
+
+p12 <- read.table('pheno_plate2.txt', sep='\t', header=TRUE)
+rownames(p12)<-p12$sample_id
+
+
+#make a vector that matches the cel names of the arrays to the row names of the pheno data
+
+mt11 <- match(sampleNames(all_data11), rownames(p11))
+
+mt12 <- match(sampleNames(all_data12), rownames(p12))
+
+# create annotated dataframe of pheno data
+
+vmd11 = data.frame(labelDescription = c("sample_id: id for the sample", "pt_id: ID for the cell line - B, E or H", "group: A, B, C or D - itln1 concentration"))
+
+vmd12 = data.frame(labelDescription = c("sample_id: id for the sample", "pt_id: ID for the cell line - B, E or H", "group: A, B, C or D - itln1 concentration"))
+
+
+p211 <- AnnotatedDataFrame(p11[mt11,], varMetadata=vmd11)
+
+p212 <- AnnotatedDataFrame(p12[mt12,], varMetadata=vmd12)
+
+#now insert the pheno data table as an annotated dataframe
+phenoData(all_data11) = p211
+phenoData(all_data12) = p212
+```
+
+# Combine the technical replicates
+```{r}
+# average the technical replicates by using the arithmetic mean of the raw Cq values
+all_data_combined11 <- combineTechReps(all_data11)
+all_data_combined12 <- combineTechReps(all_data12)
+```
+
+# Find stable reference gene
+```{r}
+hks11 <- c('ACTB', 'GAPDH', 'B2M', 'HPRT', 'YWHAZ')
+hks12 <- c('ACTB', 'GAPDH', 'B2M', 'HPRT', 'YWHAZ')
+
+hk_data_combined11 <- all_data_combined11[featureNames(all_data_combined11) %in% hks11]
+hk_data_combined12 <- all_data_combined12[featureNames(all_data_combined12) %in% hks12]
+
+
+hk_data_combined #<- hk_data_combined[ ,pData(hk_data_combined)$fat_depot=='SubCut' ]
+
+clin_group11 <- pData(hk_data_combined11)$group
+clin_group12 <- pData(hk_data_combined12)$group
+
+# for groups, bit of selecting down to just hk genes
+grp_hks11 <- selectHKs(hk_data_combined11, group=clin_group11, Symbols=hks11, method='geNorm', log=TRUE)
+grp_hks12 <- selectHKs(hk_data_combined12, group=clin_group12, Symbols=hks12, method='geNorm', log=TRUE)
+
+grp_hks11$variation
+grp_hks11$ranking
+
+grp_hks12$variation
+grp_hks12$ranking
+```
+
+# $\Delta$ Cq Method with 4 reference genes for normalisation
+```{r}
+ref_hk11 <- c('B2M', 'YWHAZ', 'GAPDH', 'ACTB')
+ref_hk12 <- c('B2M', 'HPRT', 'ACTB', 'GAPDH')
+
+data_norm11 <- deltaCq(qPCRBatch = all_data_combined11, hkgs = ref_hk11, calc="arith")
+data_norm12 <- deltaCq(qPCRBatch = all_data_combined12, hkgs = ref_hk12, calc="arith")
+
+# long format
+data_norm_df11 <- as.data.frame(exprs(data_norm11))
+data_norm_df12 <- as.data.frame(exprs(data_norm12))
+
+data_norm_df11$gene <- rownames(data_norm_df11)
+data_norm_df12$gene <- rownames(data_norm_df12)
+
+data_norm_long11 <- gather(data_norm_df11, Sample, value, Sample1:Sample9)
+data_norm_long12 <- gather(data_norm_df12, Sample, value, Sample1:Sample9)
+
+# add pheno data
+data_norm_long_211 <- merge(p11, data_norm_long11, by.x='sample_id', by.y='Sample')
+data_norm_long_212 <- merge(p12, data_norm_long12, by.x='sample_id', by.y='Sample')
+
+# convert norm value to linear for plotting
+data_norm_long_211 <- data_norm_long_211 %>% mutate(lin_value = 2^-value)
+data_norm_long_212 <- data_norm_long_212 %>% mutate(lin_value = 2^-value)
+
+# drop hk genes
+data_norm_long_211 <- filter(data_norm_long_211, !gene %in% c('B2M', 'YWHAZ', 'GAPDH', 'ACTB', 'HPRT'))
+data_norm_long_212 <- filter(data_norm_long_212, !gene %in% c('B2M', 'HPRT', 'ACTB', 'GAPDH', 'YWHAZ'))
+
+# write data out
+write.table(data_norm_long_211, 'geNorm_qPCR_data_LONG_plate1.csv', sep=',', row.names=FALSE, quote=FALSE)
+write.table(data_norm_long_212, 'geNorm_qPCR_data_LONG_plate2.csv', sep=',', row.names=FALSE, quote=FALSE)
+
+# https://stackoverflow.com/questions/53658586/how-to-indicate-paired-observations-with-lmer-mixed-models
+# stats for each gene
+goi11 <- 'TXNIP'
+goi12 <- 'OGT'
+
+goi_data11 <- filter(data_norm_long_211, gene==goi11) 
+goi_data12 <- filter(data_norm_long_212, gene==goi12) 
+
+dim(goi_data11)
+dim(goi_data12)
+
+# build mixed effects model, subject as nuisance variable
+mlm_mod11 <- lm(lin_value~group, data=goi_data11)
+mlm_mod12 <- lm(lin_value~group, data=goi_data12)
+
+# results
+summary(mlm_mod11)
+summary(mlm_mod12)
+
+
+#  differences in depot per group
+# https://cran.r-project.org/web/packages/emmeans/vignettes/interactions.html
+# https://cran.r-project.org/web/packages/emmeans/vignettes/comparisons.html
+
+# https://stackoverflow.com/questions/47471246/pairwise-comparisons-on-lmer-using-lsmeans-or-difflsmeans
+# spoke to Kate Howie (statistician), she's happy with this as post hoc test
+emmeans(mlm_mod11, pairwise~group, adjust='tukey')
+emmeans(mlm_mod12, pairwise~group, adjust='tukey')
+
+# diagnostic plot
+# make emmGrid obj
+grd11 <- ref_grid(mlm_mod11)
+grd12 <- ref_grid(mlm_mod12)
+
+emmip(grd11,group~1)
+emmip(grd12,group~1)
+
+plot(grd11, by='group')
+plot(grd12, by='group')
+```
+Create a plot of the expression data.
+```{r}
+# plot
+data_norm_long_plt11 <- data_norm_long_211
+data_norm_long_plt12 <- data_norm_long_212
+data_norm_long_one_plot <- rbind(data_norm_long_plt11, data_norm_long_plt12)
+
+cols11 <- c('goldenrod', 'darkmagenta', 'cornflowerblue', 'firebrick')
+cols12 <- c('goldenrod', 'darkmagenta', 'cornflowerblue', 'firebrick')
+
+# plot
+plt11 <- ggplot(data_norm_long_plt11, aes(group, lin_value, colour=group)) +
+  geom_point(position=position_jitterdodge(jitter.width=0.05)) + 
+  scale_colour_manual(values=cols11, name = 'Group')+
+  facet_wrap(~gene, scales='free_y') + 
+  labs(x = 'Intelectin-1 concentration (ng/ml)', y='Expression AU') +
+  stat_summary(fun.y = "mean", fun.ymin = "mean", fun.ymax= "mean", 
+               size= 0.3, geom = "crossbar", 
+               position=position_jitterdodge(jitter.width=0.1), aes(width=0.8)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(labels=c("A" = "0", "B" = "10", "C" = "100", "D" = "500"))+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) 
+
+plt11
+
+plt12 <- ggplot(data_norm_long_plt12, aes(group, lin_value, colour=group)) +
+  geom_point(position=position_jitterdodge(jitter.width=0.05)) + 
+  scale_colour_manual(values=cols12, name = 'Group')+
+  facet_wrap(~gene, scales='free_y') + 
+  labs(x = 'Intelectin-1 concentration (ng/ml)', y='Expression AU') +
+  stat_summary(fun.y = "mean", fun.ymin = "mean", fun.ymax= "mean", 
+               size= 0.3, geom = "crossbar", 
+               position=position_jitterdodge(jitter.width=0.1), aes(width=0.8)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(labels=c("A" = "0", "B" = "10", "C" = "100", "D" = "500"))+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) 
+
+plt12
+
+#combining the previous plots (plt11 and plt12) into one 
+
+one_plot <- ggplot(data_norm_long_one_plot, aes(group, lin_value, colour=group)) +
+  geom_point(position=position_jitterdodge(jitter.width=0.05)) + 
+  scale_colour_manual(values=cols12, name = 'Group')+
+  facet_wrap(~gene, scales='free_y') + 
+  labs(x = 'Intelectin-1 concentration (ng/ml)', y='Expression AU') +
+  stat_summary(fun.y = "mean", fun.ymin = "mean", fun.ymax= "mean", 
+               size= 0.3, geom = "crossbar", 
+               position=position_jitterdodge(jitter.width=0.1), aes(width=0.8)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(labels=c("A" = "0", "B" = "10", "C" = "100", "D" = "500"))+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) 
+
+one_plot
+```

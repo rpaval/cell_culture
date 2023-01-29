@@ -1,0 +1,131 @@
+---
+title: "Glucose uptake"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Glucose uptake - data analysis 
+
+Treatments: A - 0ng/ml, B - 10ng/ml, C - 100ng/ml, D - 500ng/ml 
+
+The experiment used three different lots of cells (i.e., 1, 2 and 3) coming from 3 different healthy adults.
+
+```{r}
+library(tidyverse)
+library(readr) 
+library(tidyr) 
+library(rstanarm)
+library(bayesplot) 
+library(tidybayes)
+library(emmeans) 
+library(scico) 
+#setwd
+```
+
+```{r}
+glucose_data = read.csv("glucose_uptake.csv")
+head(glucose_data)
+
+#summary statistics
+group_by(glucose_data, treatment) %>%
+  summarise(
+    count = n(),
+    mean = mean(values, na.rm = TRUE),
+    sd = sd(values, na.rm = TRUE)) 
+
+glucose_data$Lot <- as.character(glucose_data$Lot)
+
+#visualize data 
+g1 <- ggplot(glucose_data, aes(x = treatment, y = values)) + 
+  geom_jitter(width=0.05, aes(colour = Lot), size = 4) +
+  stat_summary(fun='mean',  width=0.4, geom='crossbar') + 
+  xlab("Intelectin-1 concentration (ng/ml)") + ylab("Luminescence (RLU)") +
+  scale_x_discrete(labels=c("A" = "0", "B" = "10", "C" = "100", "D" = "500")) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20))
+  
+
+g1
+```
+
+#Bayesian ANOVA 
+
+We want to examine whether the treatments had an effect on glucose uptake. 
+
+```{r}
+#Priors
+bayes_aov_priors <- stan_lm(values ~ treatment, 
+                            prior_intercept = normal(location = mean(glucose_data$values), 
+                                                     scale = sd((glucose_data$values))), 
+                            prior = R2(location = 0.5, what = 'mode'), 
+                            prior_PD = TRUE, 
+                            data = glucose_data, seed = 123)
+plot(bayes_aov_priors, plotfun = 'dens')
+prior_summary(bayes_aov_priors)
+
+#Linear model
+bayes_aov <- stan_lm(values ~ treatment, 
+                     prior_intercept = normal(location = mean(glucose_data$values),
+                                                        scale = sd((glucose_data$values))),
+                     prior = R2(location = 0.5, what = 'mode'), 
+                     data = glucose_data, 
+                     seed = 123)
+
+# plots
+plot(bayes_aov, plotfun = 'dens')
+
+# summary, 90% HDI
+summary(bayes_aov, probs = c(0.05, 0.5, 0.95), digits = 3)
+```
+
+```{r}
+effect_draws <- emmeans(bayes_aov, spec = ~treatment) %>% gather_emmeans_draws()
+head(effect_draws)
+
+div_cols <- scico(4, palette = 'roma') # from the scales lib
+effect_plt <-  ggplot(effect_draws, aes(x = .value, fill = treatment)) + 
+  stat_halfeye(.width = 0.9, point_interval = median_hdi, alpha = 0.7) + 
+  scale_fill_manual(values = div_cols, 
+                    labels=c('0 ng/ml', '10 ng/ml', '100 ng/ml', '500 ng/ml')) +
+  guides(fill = guide_legend(title="ITLN1 treatment")) + 
+  theme(axis.text.y=element_blank(), 
+        axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20)) +
+  xlab("Luminescence (RLU)")
+                
+effect_plt 
+```
+
+```{r}
+effect_draws_summary <- emmeans(bayes_aov, spec = ~treatment, level = 0.9)
+effect_draws_summary #table with means and90 %HDI
+```
+
+```{r}
+plot(bayes_aov, plotfun = 'mcmc_areas', pars = 'R2', prob = 0.9)
+summary(bayes_aov, pars = 'R2', probs = c(0.05, 0.5, 0.95), digits = 3)
+```
+
+```{r}
+pairs(emmeans(bayes_aov, spec = ~treatment, level = 0.9))
+diffs <- pairs(emmeans(bayes_aov, spec = ~treatment)) %>% gather_emmeans_draws()
+ggplot(diffs, aes(x = .value, y = contrast)) + stat_halfeye(.width = 0.9, point_interval = mean_hdi)
+```
+
+```{r}
+effect_draws_summary <- emmeans(bayes_aov, spec = ~treatment, level = 0.9)
+ctrl_uHDI <- effect_draws %>% filter(treatment == 'D') %>% summarise(uHDI = quantile(.value, 0.95)) %>% pull() 
+effect_draws %>% group_by(treatment) %>% summarise(prop_gt = sum(.value > ctrl_uHDI)/length(.value))
+```

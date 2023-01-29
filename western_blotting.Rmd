@@ -1,0 +1,264 @@
+---
+title: "western_blotting"
+output: pdf_document
+date: "2022-11-16"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Western blotting - data analysis 
+
+Treatments: A - 0ng/ml, B - 10ng/ml, C - 100ng/ml, D - 500ng/ml 
+
+The experiment used three different lots of cells (i.e., 1, 2 and 3) coming from 3 different healthy adults (Lonza). 
+
+```{r}
+library(tidyverse)
+library(readr) 
+library(tidyr) 
+library(rstanarm)
+library(bayesplot) 
+library(tidybayes)
+library(emmeans) 
+library(scico) 
+#setwd
+```
+
+
+```{r}
+wb_data = read.csv("optical_density_akt.csv")
+head(wb_data)
+
+#summary statistics
+group_by(wb_data, treatment) %>%
+  summarise(
+    count = n(),
+    mean = mean(values, na.rm = TRUE),
+    sd = sd(values, na.rm = TRUE)) 
+
+wb_data$Lot <- as.character(wb_data$Lot)
+
+#visualize data 
+wb_plot <- ggplot(wb_data, aes(x = treatment, y = values)) + 
+ geom_jitter(width=0.05, aes(colour = Lot), size = 4) +
+  stat_summary(fun='mean',  width=0.4, geom='crossbar') + 
+  xlab("Intelectin-1 concentration (ng/ml)") + ylab("Phosphorylated:total Akt (AU)") +
+  scale_x_discrete(labels=c("A" = "0", "B" = "10", "C" = "100", "D" = "500")) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20))
+
+wb_plot
+```
+
+#Bayesian ANOVA 
+
+We want to examine whether the treatments had an effect on pAkt:Akt.
+
+```{r}
+bayes_aov_priors <- stan_lm(values ~ treatment, 
+                            prior_intercept = normal(location = mean(wb_data$values), 
+                                                     scale = sd((wb_data$values))), 
+                            prior = R2(location = 0.5, what = 'mode'), 
+                            prior_PD = TRUE, 
+                            data = wb_data, seed = 123)
+plot(bayes_aov_priors, plotfun = 'dens')
+prior_summary(bayes_aov_priors)
+
+#Linear model
+bayes_aov <- stan_lm(values ~ treatment, 
+                     prior_intercept = normal(location = mean(wb_data$values),
+                                                        scale = sd((wb_data$values))),
+                     prior = R2(location = 0.5, what = 'mode'), 
+                     data = wb_data, 
+                     seed = 123)
+
+# plots
+plot(bayes_aov, plotfun = 'dens')
+
+# summary, 90% HDI
+summary(bayes_aov, probs = c(0.05, 0.5, 0.95), digits = 3)
+```
+
+#### Is there an effect of the categorical predictor?
+
+```{r}
+effect_draws <- emmeans(bayes_aov, spec = ~treatment) %>% gather_emmeans_draws()
+head(effect_draws)
+
+div_cols <- scico(4, palette = 'roma') # from the scales lib
+effect_plt <-  ggplot(effect_draws, aes(x = .value, fill = treatment)) +   
+  stat_halfeye(.width = 0.9, point_interval = median_hdi, alpha = 0.7) + 
+  scale_fill_manual(values = div_cols, 
+                    labels=c('0 ng/ml', '10 ng/ml', '100 ng/ml', '500 ng/ml')) +
+  guides(fill = guide_legend(title="ITLN1 treatment")) + 
+  theme(axis.text.y=element_blank(), 
+        axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20)) +
+  xlab("Phosphorylated:total Akt (AU)")
+
+effect_plt #figure with overalapping posterior distribution
+```
+
+```{r}
+effect_draws_summary <- emmeans(bayes_aov, spec = ~treatment, level = 0.9)
+effect_draws_summary #table with means and90 %HDI
+```
+
+##How much variance in the pAKT/AKT ratio estimates does ```treatment``` account for?
+
+```{r}
+plot(bayes_aov, plotfun = 'mcmc_areas', pars = 'R2', prob = 0.9)
+summary(bayes_aov, pars = 'R2', probs = c(0.05, 0.5, 0.95), digits = 3)
+```
+
+
+##How big are the differences between the different treatments?
+
+```{r}
+pairs(emmeans(bayes_aov, spec = ~treatment, level = 0.9))
+diffs <- pairs(emmeans(bayes_aov, spec = ~treatment)) %>% gather_emmeans_draws()
+ggplot(diffs, aes(x = .value, y = contrast)) + stat_halfeye(.width = 0.9, point_interval = mean_hdi)
+```
+
+```{r}
+effect_draws_summary <- emmeans(bayes_aov, spec = ~treatment, level = 0.9)
+ctrl_uHDI <- effect_draws %>% filter(treatment == 'A') %>% summarise(uHDI = quantile(.value, 0.95)) %>% pull() 
+effect_draws %>% group_by(treatment) %>% summarise(prop_gt = sum(.value > ctrl_uHDI)/length(.value))
+```
+
+#Posterior predictive checking.
+
+```{r}
+div_cols <-scico(n = 4, palette = "roma")
+
+yrep <- add_predicted_draws(bayes_aov, newdata = wb_data, 
+                            model = bayes_aov, ndraws = 500)
+
+ggplot(yrep, aes(.prediction, treatment, fill = treatment)) + 
+  stat_slab() +  scale_fill_manual( values = div_cols) +
+  geom_point(aes(x = values), data = wb_data, alpha = 0.5, 
+             position = position_nudge(y = -0.05))
+```
+
+
+```{r}
+puro_data = read.csv("optical_density_puro.csv")
+head(puro_data)
+
+#summary statistics
+group_by(puro_data, treatment) %>%
+  summarise(
+    count = n(),
+    mean = mean(values, na.rm = TRUE),
+    sd = sd(values, na.rm = TRUE)) 
+
+puro_data$Lot <- as.character(puro_data$Lot)
+
+#visualize data 
+puro_plot <- ggplot(puro_data, aes(x = treatment, y = values)) + 
+ geom_jitter(width=0.05, aes(colour = Lot), size = 4) +
+  stat_summary(fun='mean',  width=0.4, geom='crossbar') + 
+  xlab("Intelectin-1 concentration (ng/ml)") + ylab("Puromycin incorporation (AU)") +
+  scale_x_discrete(labels=c("A" = "0", "B" = "10", "C" = "100", "D" = "500")) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20))
+
+puro_plot
+```
+
+#Bayesian ANOVA 
+
+We want to examine whether the treatments had an effect on puro expression.
+
+```{r}
+bayes_aov_priors2 <- stan_lm(values ~ treatment, 
+                            prior_intercept = normal(location = mean(puro_data$values), 
+                                                     scale = sd((puro_data$values))), 
+                            prior = R2(location = 0.5, what = 'mode'), 
+                            prior_PD = TRUE, 
+                            data = puro_data, seed = 123)
+plot(bayes_aov_priors2, plotfun = 'dens')
+prior_summary(bayes_aov_priors2)
+
+#Linear model
+bayes_aov2 <- stan_lm(values ~ treatment, 
+                     prior_intercept = normal(location = mean(puro_data$values),
+                                                        scale = sd((puro_data$values))),
+                     prior = R2(location = 0.5, what = 'mode'), 
+                     data = puro_data, 
+                     seed = 123)
+
+# plots
+plot(bayes_aov2, plotfun = 'dens')
+
+# summary, 90% HDI
+summary(bayes_aov2, probs = c(0.05, 0.5, 0.95), digits = 3)
+```
+
+
+#### Is there an effect of the categorical predictor?
+
+
+```{r}
+effect_draws2 <- emmeans(bayes_aov2, spec = ~treatment) %>% gather_emmeans_draws()
+head(effect_draws2)
+
+div_cols2 <- scico(4, palette = 'roma') # from the scales lib
+effect_plt2 <-  ggplot(effect_draws2, aes(x = .value, fill = treatment)) +   
+  stat_halfeye(.width = 0.9, point_interval = median_hdi, alpha = 0.7) + 
+  scale_fill_manual(values = div_cols2, 
+                    labels=c('0 ng/ml', '10 ng/ml', '100 ng/ml', '500 ng/ml')) +
+  guides(fill = guide_legend(title="ITLN1 treatment")) + 
+  theme(axis.text.y=element_blank(), 
+        axis.title.y=element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20)) +
+  xlab("Puromycin incorporation (AU)")
+
+effect_plt2 #figure with overalapping posterior distribution
+```
+
+
+```{r}
+effect_draws_summary2 <- emmeans(bayes_aov2, spec = ~treatment, level = 0.9)
+effect_draws_summary2 #table with means and 90% HDI
+```
+
+
+##How much variance in the puromycin expression does ```treatment``` account for?
+
+```{r}
+plot(bayes_aov2, plotfun = 'mcmc_areas', pars = 'R2', prob = 0.9)
+summary(bayes_aov2, pars = 'R2', probs = c(0.05, 0.5, 0.95), digits = 3)
+```
+
+##How big are the differences between the different treatments?
+
+```{r}
+pairs(emmeans(bayes_aov2, spec = ~treatment, level = 0.9))
+diffs2 <- pairs(emmeans(bayes_aov2, spec = ~treatment)) %>% gather_emmeans_draws()
+ggplot(diffs2, aes(x = .value, y = contrast)) + stat_halfeye(.width = 0.9, point_interval = mean_hdi)
+```
+
+
+```{r}
+effect_draws_summary2 <- emmeans(bayes_aov2, spec = ~treatment, level = 0.9)
+ctrl_uHDI2 <- effect_draws2 %>% filter(treatment == 'A') %>% summarise(uHDI = quantile(.value, 0.95)) %>% pull() 
+effect_draws2 %>% group_by(treatment) %>% summarise(prop_gt = sum(.value > ctrl_uHDI2)/length(.value))
+```
